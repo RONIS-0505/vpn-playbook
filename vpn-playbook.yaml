@@ -3,7 +3,7 @@
   hosts: vpn_host
   become: true
   vars_files:
-    - vault.yml
+    - vault.yaml
   tasks:
 
     - name: Install essential packages

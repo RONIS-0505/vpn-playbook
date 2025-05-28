@@ -1,0 +1,155 @@
+---
+- name: Configure server with Docker, SSH, Outline and other tools
+  hosts: vpn_host
+  become: yes
+  vars:
+    ssh_port: <>
+    outline_port_1: <>
+    outline_port_2: <>
+    new_username: <>
+    new_password: <>
+    email_recipient: <>
+    telegram_token: <>
+    chat_id: <>
+    admin_ssh_key: <>
+  tasks:
+    # Установка пакетов
+    - name: Install essential packages
+      apt:
+        name:
+          - sudo
+          - fail2ban
+          - nano
+          - ufw
+        state: present
+        update_cache: yes
+    - name: Install Docker
+      block:
+        - name: Install dependencies
+          apt:
+            name:
+              - apt-transport-https
+              - ca-certificates
+              - curl
+              - gnupg-agent
+              - software-properties-common
+            state: present
+            update_cache: yes
+
+        - name: Add Docker GPG key
+          apt_key:
+            url: https://download.docker.com/linux/ubuntu/gpg
+            state: present
+
+        - name: Add Docker repository
+          apt_repository:
+            repo: "deb [arch=amd64] https://download.docker.com/linux/ubuntu {{ ansible_distribution_release }} stable"
+            state: present
+            update_cache: yes
+
+        - name: Install Docker packages
+          apt:
+            name:
+              - docker-ce
+              - docker-ce-cli
+              - containerd.io
+            state: present
+            update_cache: yes
+      when: ansible_os_family == 'Debian'
+    # Настройка UFW
+    - name: Configure UFW
+      block:
+        - name: Allow multiple ports
+          ufw:
+            rule: allow
+            port: "{{ item.port }}"
+            proto: "{{ item.proto | default('tcp') }}"
+          loop:
+            - { port: "{{ ssh_port }}", proto: "tcp" }
+            - { port: "{{ outline_port_1 }}", proto: "tcp" }
+            - { port: "{{ outline_port_2 }}", proto: "udp" }
+            - { port: "443", proto: "tcp" }
+        
+            
+        - name: Enable UFW
+          ufw:
+            state: enabled
+            policy: deny
+
+    # Настройка SSH
+    - name: Configure SSH
+      block:
+        - name: Change SSH port
+          lineinfile:
+            path: /etc/ssh/sshd_config
+            regexp: '^#?Port'
+            line: 'Port {{ ssh_port }}'
+
+        - name: Secure SSH config
+          lineinfile:
+            path: /etc/ssh/sshd_config
+            regexp: "^{{ item.regexp }}"
+            line: "{{ item.line }}"
+          loop:
+            - { regexp: '^#?PermitRootLogin', line: 'PermitRootLogin no' }
+            - { regexp: '^#?PubkeyAuthentication', line: 'PubkeyAuthentication yes' }
+            - { regexp: '^#?PasswordAuthentication', line: 'PasswordAuthentication no' }
+      notify: Restart SSH
+
+    # Управление пользователями
+    - name: Create new user
+      user:
+        name: "{{ new_username }}"
+        create_home: yes
+        shell: /bin/bash
+        password: "{{ new_password | password_hash('sha512') }}"
+
+    - name: Add user to groups
+      user:
+        name: "{{ new_username }}"
+        groups: "{{ item }}"
+        append: yes
+      loop:
+        - sudo
+        - docker
+
+    # Настройка SSH ключей
+    - name: Setup SSH keys
+      authorized_key:
+        user: "{{ item }}"
+        state: present
+        key: "{{ admin_ssh_key }}"
+      loop:
+        - "{{ ansible_user }}"
+        - "{{ new_username }}"
+
+    # Настройка Docker
+    - name: Start Docker service
+      systemd:
+        name: docker
+        state: started
+        enabled: yes
+
+    # Установка Outline
+    - name: Install Outline Server
+      shell: bash -c "$(wget -qO- https://raw.githubusercontent.com/Jigsaw-Code/outline-server/master/src/server_manager/install_scripts/install_server.sh)"
+      register: outline_output
+      args:
+        executable: /bin/bash
+
+    - name: Send notification via Telegram
+      uri:
+        url: "https://api.telegram.org/bot{{ telegram_token }}/sendMessage"
+        method: POST
+        body_format: json
+        body:
+          chat_id: "{{ chat_id }}"
+          text: "Outline Data:\n{{ outline_output.stdout }}"
+      when: outline_output.stdout is defined
+
+
+  handlers:
+    - name: Restart SSH
+      service:
+        name: sshd
+        state: restarted
